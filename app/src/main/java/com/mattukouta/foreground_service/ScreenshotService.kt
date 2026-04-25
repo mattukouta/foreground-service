@@ -1,6 +1,10 @@
 package com.mattukouta.foreground_service
 
-import android.app.*
+import android.app.Activity
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.Service
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
@@ -12,18 +16,28 @@ import android.media.ImageReader
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.os.Build
+import android.os.Environment
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.provider.MediaStore
 import android.util.DisplayMetrics
 import android.util.Log
 import android.view.WindowManager
 import androidx.core.app.NotificationCompat
-import java.io.File
-import java.io.FileOutputStream
-import java.text.SimpleDateFormat
-import java.util.*
 import androidx.core.graphics.createBitmap
+import com.mattukouta.foreground_service.event.TakeEventFlow
+import com.mattukouta.foreground_service.vo.TakeEvent
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 class ScreenshotService : Service() {
 
@@ -32,6 +46,7 @@ class ScreenshotService : Service() {
     private var virtualDisplay: VirtualDisplay? = null
     private val handler = Handler(Looper.getMainLooper())
     private var screenshotRunnable: Runnable? = null
+    private val coroutineScope = CoroutineScope(Dispatchers.IO)
 
     companion object {
         private const val NOTIFICATION_ID = 1
@@ -39,13 +54,15 @@ class ScreenshotService : Service() {
         const val EXTRA_RESULT_CODE = "extra_result_code"
         const val EXTRA_DATA = "extra_data"
         private const val TAG = "ScreenshotService"
-        private const val INTERVAL = 60 * 60 * 1000L // 1 hour
+
+        private const val INTERVAL = 10 * 60 * 1000L // 1 hour
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val resultCode = intent?.getIntExtra(EXTRA_RESULT_CODE, Activity.RESULT_CANCELED) ?: Activity.RESULT_CANCELED
+        val resultCode = intent?.getIntExtra(EXTRA_RESULT_CODE, Activity.RESULT_CANCELED)
+            ?: Activity.RESULT_CANCELED
         val data = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             intent?.getParcelableExtra(EXTRA_DATA, Intent::class.java)
         } else {
@@ -80,7 +97,11 @@ class ScreenshotService : Service() {
             .build()
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
+            startForeground(
+                NOTIFICATION_ID,
+                notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+            )
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }
@@ -131,13 +152,16 @@ class ScreenshotService : Service() {
     }
 
     private fun scheduleScreenshot() {
-        screenshotRunnable = object : Runnable {
-            override fun run() {
+        coroutineScope.launch {
+            // 最初実行までの遅延（例：5秒）
+            // これにより、起動直後の負荷を分散し、ANRを回避しやすくなります。
+            delay(10000L)
+            
+            while (isActive) {
                 takeScreenshot()
-                handler.postDelayed(this, INTERVAL)
+                delay(INTERVAL)
             }
         }
-        handler.post(screenshotRunnable!!)
     }
 
     private fun takeScreenshot() {
@@ -162,22 +186,50 @@ class ScreenshotService : Service() {
     private fun saveBitmap(bitmap: Bitmap) {
         val timeStamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
         val fileName = "screenshot_$timeStamp.png"
-        val file = File(getExternalFilesDir(null), fileName)
+
+        val resolver = contentResolver
+        val contentValues = ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
+            put(MediaStore.MediaColumns.MIME_TYPE, "image/png")
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                put(
+                    MediaStore.MediaColumns.RELATIVE_PATH,
+                    Environment.DIRECTORY_PICTURES + File.separator + "Screenshots"
+                )
+                put(MediaStore.MediaColumns.IS_PENDING, 1)
+            }
+        }
+
+        val imageUri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, contentValues)
 
         try {
-            val out = FileOutputStream(file)
-            bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
-            out.flush()
-            out.close()
-            Log.d(TAG, "Screenshot saved: ${file.absolutePath}")
+            imageUri?.let { uri ->
+                resolver.openOutputStream(uri)?.use { out ->
+                    bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
+                }
+
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    contentValues.clear()
+                    contentValues.put(MediaStore.MediaColumns.IS_PENDING, 0)
+                    resolver.update(uri, contentValues, null, null)
+                }
+                Log.d(TAG, "Screenshot saved to Gallery: $uri")
+                coroutineScope.launch {
+                    TakeEventFlow.emitEvent(TakeEvent.Success)
+                }
+            }
         } catch (e: Exception) {
-            Log.e(TAG, "Error saving screenshot", e)
+            Log.e(TAG, "Error saving screenshot to MediaStore", e)
+            coroutineScope.launch {
+                TakeEventFlow.emitEvent(TakeEvent.Success)
+            }
+
         }
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        screenshotRunnable?.let { handler.removeCallbacks(it) }
+        coroutineScope.cancel()
         virtualDisplay?.release()
         imageReader?.close()
         mediaProjection?.stop()

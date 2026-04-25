@@ -7,6 +7,7 @@ import android.content.Intent
 import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.Bundle
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -18,10 +19,13 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
-import androidx.compose.runtime.*
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import com.mattukouta.foreground_service.event.TakeEventFlow
 import com.mattukouta.foreground_service.ui.theme.ForegroundserviceTheme
+import com.mattukouta.foreground_service.vo.TakeEvent
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -38,7 +42,9 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-fun ScreenshotControl(modifier: Modifier = Modifier) {
+fun ScreenshotControl(
+    modifier: Modifier = Modifier
+) {
     val context = LocalContext.current
     val mediaProjectionManager =
         context.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
@@ -60,6 +66,22 @@ fun ScreenshotControl(modifier: Modifier = Modifier) {
     ) { isGranted ->
         if (isGranted) {
             projectionLauncher.launch(mediaProjectionManager.createScreenCaptureIntent())
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        TakeEventFlow.event.collect { event ->
+            when (event) {
+                TakeEvent.Success -> {
+                    // 成功時の処理（トースト表示など）
+                    Toast.makeText(context, "Screenshot saved!", Toast.LENGTH_SHORT).show()
+                }
+
+                TakeEvent.Failed -> {
+                    // 失敗時の処理
+                    Toast.makeText(context, "Failed to take screenshot", Toast.LENGTH_SHORT).show()
+                }
+            }
         }
     }
 
